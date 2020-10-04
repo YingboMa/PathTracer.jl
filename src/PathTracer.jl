@@ -42,6 +42,7 @@ for op in [:+, :-, :*, :/]
 end
 Base.:(-)(v::Vect{T}) where T = Vect(@ntuple 3 i -> -v[i])
 Base.muladd(v1::Vect, v2::Vect, v3::Vect) = Vect(@ntuple 3 i -> muladd(v1[i], v2[i], v3[i]))
+Base.muladd(v1::Vect, v2::Number, v3::Vect) = Vect(@ntuple 3 i -> muladd(v1[i], v2, v3[i]))
 Base.zero(::Type{Vect{T}}) where T = Vect(@ntuple 3 _->zero(T))
 Base.zero(::T) where {T<:Vect} = zero(T)
 
@@ -81,27 +82,42 @@ end
 Base.@kwdef struct Material{C,E,F,I} <: AbstractMaterial
     albedo::C = nothing
     emission::E = nothing
-    fuzz::F = nothing
-    ir::I = nothing
+    fuzz::F = 0.0
+    ir::I = 1.0
     type::MaterialType = LAMBERTIAN
 end
-function scatter(insec::Intersection, ray::Ray)
+@muladd function scatter(insec::Intersection, ray::Ray)
     @unpack dir = ray
-    @unpack n, p, material = insec
+    @unpack n, p, material, front = insec
     if material.type === LAMBERTIAN
         scatter_dir = n + random_unit_vector()
-        scattered = Ray(p, scatter_dir)
         attenutation = material.albedo
-        return true, scattered, attenutation
+        visable = true
     elseif material.type === METAL
-        reflect_dir = reflect(dir, n)
-        reflected = Ray(p, reflect_dir)
+        scatter_dir = reflect(dir, n) + material.fuzz * random_in_unit_sphere()
         attenutation = material.albedo
-        return reflect_dir'n > 0, reflected, attenutation
+        visable = scatter_dir'n > 0
+    else # DIELECTRIC
+        attenutation = RGB(1, 1, 1.0)
+        @unpack ir = material
+        ir = front ? inv(ir) : ir
+        scatter_dir = refract(dir, n, ir)
+        visable = true
     end
+    scattered = Ray(p, scatter_dir)
+    return visable, scattered, attenutation
 end
 
-reflect(v::Vect, n::Vect) = v - (2*(v'n))*n # assume normalized
+@muladd reflect(v::Vect, n::Vect) = v - (2*(v'n))*n # assume normalized
+@fastmath @muladd function refract(uv::Vect, n::Vect, ir)
+    cosθ = min(-(uv'n), 1)
+    sinθ = sqrt(1 - cosθ^2)
+    cannot_refract = ir * sinθ > 1
+    cannot_refract && return reflect(dir, n)
+    r_perp = ir * (uv + cosθ*n)
+    r_para = -sqrt(abs(1 - r_perp'r_perp)) * n
+    return r_perp + r_para
+end
 
 ###
 ### Shapes
@@ -292,9 +308,9 @@ function main(;
     img = zeros(RGB{Float64}, image_height, image_width)
 
     material_groud = Material(albedo=RGB(0.8, 0.8, 0.0), type=LAMBERTIAN)
-    material_center = Material(albedo=RGB(0.7, 0.3, 0.3), type=LAMBERTIAN)
-    material_left = Material(albedo=RGB(0.8, 0.8, 0.8), type=METAL)
-    material_right = Material(albedo=RGB(0.8, 0.6, 0.2), type=METAL)
+    material_center = Material(albedo=RGB(0.1, 0.2, 0.5), type=LAMBERTIAN)
+    material_left = Material(ir=1.5, type=DIELECTRIC)
+    material_right = Material(albedo=RGB(0.8, 0.6, 0.2), fuzz=1.0, type=METAL)
 
     spheres = (
         Sphere(Vect(0.0, -100.5, -1), 100.0, material_groud),
