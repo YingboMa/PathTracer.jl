@@ -8,6 +8,7 @@ using Images, FileIO
 using Printf
 using Distributions
 using Base.Cartesian
+using ProgressMeter
 
 ###
 ### Math
@@ -24,6 +25,8 @@ Base.Tuple(v::Vect) = v.x, v.y, v.z
 Vect(xx::Tuple) = Vect(xx...,)
 Vect(x::Number) = Vect(@ntuple 3 i->x)
 vectrand(d::Distribution) where T = Vect(@ntuple 3 i->rand(d))
+Base.promote_rule(::Type{Vect{T}}, ::Type{Vect{S}}) where {T,S} = Vect{promote_type(T, S)}
+Base.convert(::Type{Vect{T}}, v::Vect{S}) where {T,S} = Vect(@ntuple 3 i->convert(T, v[i]))
 
 @muladd LinearAlgebra.dot(v0::Vect, v1::Vect) = v0.x * v1.x + v0.y * v1.y + v0.z * v1.z
 @muladd LinearAlgebra.cross(v0::Vect, v1::Vect) = Vect(
@@ -113,10 +116,16 @@ end
     cosθ = min(-(uv'n), 1)
     sinθ = sqrt(1 - cosθ^2)
     cannot_refract = ir * sinθ > 1
-    cannot_refract && return reflect(dir, n)
+    (cannot_refract || reflectance(cosθ, ir) > rand()) && return reflect(uv, n)
     r_perp = ir * (uv + cosθ*n)
     r_para = -sqrt(abs(1 - r_perp'r_perp)) * n
     return r_perp + r_para
+end
+
+function reflectance(cosθ, ir)
+    r₀ = (1 - ir) / (1 + ir)
+    r₀ = r₀^2
+    return r₀ + (1 - r₀)*(1 - cosθ)^5
 end
 
 ###
@@ -168,24 +177,48 @@ normal(plane::Plane, _) = plane.n
 ###
 ### Camera and Coordinate transformation
 ###
-struct Camera{P,V}
+struct Camera{L,P,V}
+    lens_radius::L
     origin::P
     lower_left_corner::P
     horizontal::V
     vertical::V
+    u::V
+    v::V
+    w::V
 end
-Camera(args...) = Camera(promote(args)...)
-function Camera(;aspect_ratio=16/9, viewport_height=2, focal_length=1.0)
+Camera(lens_radius, args...) = Camera(lens_radius, promote(args...)...)
+@muladd function Camera(;
+                lookfrom = Vect(0, 0, 0.0),
+                lookat = Vect(0, 0, -1.0),
+                vup = Vect(0, 1, 0.0),
+                vfov = 90,
+                aspect_ratio = 16/9,
+                aperture = 2.0,
+                focus_dist = norm(lookfrom - lookat),
+               )
+    θ = deg2rad(vfov)
+    h = tan(θ/2)
+    viewport_height = 2h
     viewport_width = aspect_ratio * viewport_height
-    origin = Vect(0, 0, 0.0)
-    horizontal = Vect(viewport_width, 0, 0.0)
-    vertical = Vect(0, viewport_height, 0.0)
-    lower_left_corner = origin - horizontal/2 - vertical/2 - Vect(0.0, 0, focal_length)
-    Camera(origin, lower_left_corner, horizontal, vertical)
+
+    w = normalize(lookfrom - lookat)
+    u = normalize(vup × w)
+    v = w × u
+
+    origin = lookfrom
+    horizontal = focus_dist * viewport_width * u
+    vertical = focus_dist * viewport_height * v
+    lower_left_corner = origin - horizontal/2 - vertical/2 - focus_dist*w
+    lens_radius = aperture / 2
+    Camera(lens_radius, origin, lower_left_corner, horizontal, vertical, u, v, w)
 end
-function Ray(camera::Camera, u, v)
-    @unpack origin, lower_left_corner, horizontal, vertical = camera
-    Ray(origin, lower_left_corner + u * horizontal + v * vertical - origin)
+@muladd function Ray(camera::Camera, s, t)
+    @unpack lens_radius, origin, lower_left_corner, horizontal, vertical, u, v, w = camera
+    rd = lens_radius * random_in_unit_disk()
+    offset = u * rd.x + v * rd.y
+    org = origin + offset
+    Ray(org, lower_left_corner + s * horizontal + t * vertical - org)
 end
 
 function xy2xyz((x, y), (w, h))
@@ -221,6 +254,13 @@ function random_unit_vector()
     z = rand(Uniform(-1, 1.0))
     r = sqrt(1.0 - z^2)
     return Vect(cos(φ)*r, sin(φ)*r, z)
+end
+
+function random_in_unit_disk()
+    while true
+        p = Vect(rand(Uniform(-1, 1.0)), rand(Uniform(-1, 1.0)), 0.0)
+        p'p < 1 && return p
+    end
 end
 
 ###
@@ -275,8 +315,10 @@ end
     @unpack origin, lower_left_corner, horizontal, vertical = camera
     he, wi = size(img)
     scale = inv(spp)
-    for w in 0:wi-1
-        verbose && @printf(stderr, "\rScanlines remaining: %5d", wi-1-w); flush(stderr)
+    progress = Progress(wi, dt=0.5,
+                        barglyphs=BarGlyphs('|','█', ['▁' ,'▂' ,'▃' ,'▄' ,'▅' ,'▆', '▇'],' ','|',))
+    Threads.@threads for w in 0:wi-1
+        verbose && next!(progress)
         for h in 0:he-1
             pixel_color = RGB(0.0, 0.0, 0.0)
             for _ in 1:spp
@@ -296,14 +338,11 @@ end
 
 function main(;
                 verbose = true,
+                image_height = 400,
                 aspect_ratio = 16/9,
-                viewport_height = 2,
-                focal_length = 1.0,
-                spp::Int = 100,
-                depth::Int = 50,
+                spp::Int = 5,
+                depth::Int = 5,
              )
-    aspect_ratio = 16 / 9
-    image_height = 400
     image_width = floor(Int, image_height * aspect_ratio)
     img = zeros(RGB{Float64}, image_height, image_width)
 
@@ -313,15 +352,19 @@ function main(;
     material_right = Material(albedo=RGB(0.8, 0.6, 0.2), fuzz=1.0, type=METAL)
 
     spheres = (
-        Sphere(Vect(0.0, -100.5, -1), 100.0, material_groud),
-        Sphere(Vect(0.0, 0.0, -1.0),    0.5,   material_center),
-        Sphere(Vect(-1.0, 0.0, -1.0),   0.5,   material_left),
-        Sphere(Vect(1.0, 0.0, -1.0),    0.5,   material_right),
+        Sphere(Vect( 0.0, -100.5, -1.0), 100.0,   material_groud),
+        Sphere(Vect( 0.0,    0.0, -1.0),   0.5,   material_center),
+        Sphere(Vect(-1.0,    0.0, -1.0),   0.5,   material_left),
+        Sphere(Vect(-1.0,    0.0, -1.0), -0.45,   material_left),
+        Sphere(Vect( 1.0,    0.0, -1.0),   0.5,   material_right),
     )
     camera = Camera(;
+        lookfrom = Vect( 3,  3.0,  2),
+        lookat   = Vect( 0,  0.0, -1),
+        vup      = Vect( 0,    1,  0.0),
+        vfov     = 20,
         aspect_ratio = aspect_ratio,
-        viewport_height = viewport_height,
-        focal_length = focal_length,
+        aperture = 2.0,
     )
     scene = Scene(img, spheres, nothing, spp)
 
