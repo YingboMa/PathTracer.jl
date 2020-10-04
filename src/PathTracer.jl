@@ -24,10 +24,10 @@ Base.size(::Vect) = (3,)
 Base.Tuple(v::Vect) = v.x, v.y, v.z
 Vect(xx::Tuple) = Vect(xx...,)
 Vect(x::Number) = Vect(@ntuple 3 i->x)
-randvect(d::Distribution) where T = Vect(@ntuple 3 i->rand(d))
+randvect(d::Distribution) = Vect(@ntuple 3 i->rand(d))
 Base.promote_rule(::Type{Vect{T}}, ::Type{Vect{S}}) where {T,S} = Vect{promote_type(T, S)}
 Base.convert(::Type{Vect{T}}, v::Vect{S}) where {T,S} = Vect(@ntuple 3 i->convert(T, v[i]))
-Images.RGB(v::Vect) = Vect((@ntuple 3 i->v[i])...)
+Images.RGB(v::Vect) = RGB((@ntuple 3 i->v[i])...)
 
 @muladd LinearAlgebra.dot(v0::Vect, v1::Vect) = v0.x * v1.x + v0.y * v1.y + v0.z * v1.z
 @muladd LinearAlgebra.cross(v0::Vect, v1::Vect) = Vect(
@@ -102,7 +102,7 @@ end
         attenutation = material.albedo
         visable = scatter_dir'n > 0
     else # DIELECTRIC
-        attenutation = RGB(1, 1, 1.0)
+        attenutation = Vect(1, 1, 1.0)
         @unpack ir = material
         ir = front ? inv(ir) : ir
         scatter_dir = refract(dir, n, ir)
@@ -139,7 +139,7 @@ struct Sphere{V,T,M} <: AbstractShapes
     radius::T
     material::M
 end
-@muladd function Base.intersect(sphere::Sphere, ray::Ray)
+@noinline @muladd function Base.intersect(sphere::Sphere, ray::Ray)
     T = eltype(ray.dir)
     rs = ray.org - sphere.center
     B = (2 * rs)'ray.dir
@@ -294,21 +294,21 @@ end
 ###
 ### Ray tracing
 ###
-function ray_color(scene::Scene, r::Ray, depth::Int)
-    black = RGB(0.0, 0.0, 0.0)
+@muladd function ray_color(scene::Scene, r::Ray, depth::Int)
+    black = Vect(0.0, 0.0, 0.0)
     depth <= 0 && return black
     hit, insec = intersect(scene, r)
     if hit
         visable, scattered, attenutation = scatter(insec, r)
         if visable
             color = ray_color(scene, scattered, depth-1)
-            return RGB((@ntuple 3 i->getfield(attenutation, i) * getfield(color, i))...)
+            return color * attenutation
         else
             return black
         end
     end
     t = 0.5 * (r.dir.y + 1)
-    (1.0-t)*RGB(1.0, 1.0, 1.0) + t*RGB(0.5, 0.7, 1.0)
+    (1.0-t)*Vect(1.0, 1.0, 1.0) + t*Vect(0.5, 0.7, 1.0)
 end
 
 @muladd function raytrace!(scene::Scene, camera::Camera, depth::Int; verbose=true)
@@ -321,16 +321,16 @@ end
     Threads.@threads for w in 0:wi-1
         verbose && next!(progress)
         for h in 0:he-1
-            pixel_color = RGB(0.0, 0.0, 0.0)
+            vcolor = Vect(0.0, 0.0, 0.0)
             for _ in 1:spp
                 # anti-aliasing
                 u = (w + rand()) / (wi - 1)
                 v = (h + rand()) / (he - 1)
                 ray = Ray(camera, u, v)
-                pixel_color += ray_color(scene, ray, depth)
+                vcolor += ray_color(scene, ray, depth)
             end
             # gamma correction
-            color = RGB((@ntuple 3 i->sqrt(scale * getfield(pixel_color, i)))...)
+            color = RGB((@ntuple 3 i->sqrt(scale * vcolor[i]))...)
             img[he-h, w+1] = color
         end
     end
@@ -340,9 +340,9 @@ end
 function make_scene(;image_height = 1200, aspect_ratio = 3/2, spp=5)
     image_width = floor(Int, image_height * aspect_ratio)
     img = zeros(RGB{Float64}, image_height, image_width)
-    material_groud = Material(albedo=Vect(0.5, 0.5, 0.0), type=LAMBERTIAN)
-    s = Sphere(Vect(0.0, -1000.0, -1.0), 1000.0, material_groud)
-    spheres = typeof(s)[]
+    material_ground = Material(albedo=Vect(0.5, 0.5, 0.5), type=LAMBERTIAN)
+    s = Sphere(Vect(0.0, -1000.0, 0.0), 1000.0, material_ground)
+    spheres = [s]
     for a in -11:11, b in -11:11
         choose_mat = rand()
         center = Vect(a + 0.9*rand(), 0.2, b + 0.9*rand())
@@ -385,7 +385,7 @@ make_camera(;aspect_ratio=3/2) = Camera(;
 function main(;
                 verbose = true,
                 image_height = 1200,
-                aspect_ratio = 3/2,
+                aspect_ratio = 4/3,
                 spp::Int = 5,
                 depth::Int = 5,
              )
@@ -394,9 +394,9 @@ function main(;
     camera = make_camera(aspect_ratio=aspect_ratio)
 
     raytrace!(scene, camera, depth; verbose=verbose)
-    save(File(format"PNG", "ao.png"), scene.img)
+    save(File(format"PNG", "ray.png"), scene.img)
 end
 
-export main
+export main, make_scene, make_camera, raytrace!
 
 end # module
