@@ -24,9 +24,10 @@ Base.size(::Vect) = (3,)
 Base.Tuple(v::Vect) = v.x, v.y, v.z
 Vect(xx::Tuple) = Vect(xx...,)
 Vect(x::Number) = Vect(@ntuple 3 i->x)
-vectrand(d::Distribution) where T = Vect(@ntuple 3 i->rand(d))
+randvect(d::Distribution) where T = Vect(@ntuple 3 i->rand(d))
 Base.promote_rule(::Type{Vect{T}}, ::Type{Vect{S}}) where {T,S} = Vect{promote_type(T, S)}
 Base.convert(::Type{Vect{T}}, v::Vect{S}) where {T,S} = Vect(@ntuple 3 i->convert(T, v[i]))
+Images.RGB(v::Vect) = Vect((@ntuple 3 i->v[i])...)
 
 @muladd LinearAlgebra.dot(v0::Vect, v1::Vect) = v0.x * v1.x + v0.y * v1.y + v0.z * v1.z
 @muladd LinearAlgebra.cross(v0::Vect, v1::Vect) = Vect(
@@ -83,7 +84,7 @@ end
     DIELECTRIC
 end
 Base.@kwdef struct Material{C,E,F,I} <: AbstractMaterial
-    albedo::C = nothing
+    albedo::C = Vect(0, 0, 0.0)
     emission::E = nothing
     fuzz::F = 0.0
     ir::I = 1.0
@@ -242,7 +243,7 @@ end
 ###
 function random_in_unit_sphere()
     while true
-        p = vectrand(Uniform(-1.0, 1.0))
+        p = randvect(Uniform(-1.0, 1.0))
         p'p < 1 && return p
     end
 end
@@ -336,37 +337,61 @@ end
     return scene
 end
 
+function make_scene(;image_height = 1200, aspect_ratio = 3/2, spp=5)
+    image_width = floor(Int, image_height * aspect_ratio)
+    img = zeros(RGB{Float64}, image_height, image_width)
+    material_groud = Material(albedo=Vect(0.5, 0.5, 0.0), type=LAMBERTIAN)
+    s = Sphere(Vect(0.0, -1000.0, -1.0), 1000.0, material_groud)
+    spheres = typeof(s)[]
+    for a in -11:11, b in -11:11
+        choose_mat = rand()
+        center = Vect(a + 0.9*rand(), 0.2, b + 0.9*rand())
+        if norm(center - Vect(4, 0.2, 0)) > 0.9
+            if choose_mat < 0.8
+                albedo = randvect(Uniform(0, 1.0)) * randvect(Uniform(0, 1.0))
+                sphere_material = Material(albedo=albedo, type=LAMBERTIAN)
+            elseif choose_mat < 0.95
+                albedo = randvect(Uniform(0, 1.0))
+                fuzz = rand(Uniform(0, 0.5))
+                sphere_material = Material(albedo=albedo, fuzz=fuzz, type=METAL)
+            else
+                sphere_material = Material(ir=1.5, type=DIELECTRIC)
+            end
+            push!(spheres, Sphere(center, 0.2, sphere_material))
+        end
+    end
+
+    material1 = Material(ir=1.5, type=DIELECTRIC)
+    push!(spheres, Sphere(Vect(0.0, 1, 0), 1.0, material1))
+
+    material2 = Material(albedo=Vect(0.4, 0.2, 0.1), type=LAMBERTIAN)
+    push!(spheres, Sphere(Vect(-4.0, 1, 0), 1.0, material2))
+
+    material3 = Material(albedo=Vect(0.7, 0.6, 0.5), fuzz=0.0, type=METAL)
+    push!(spheres, Sphere(Vect(4.0, 1, 0), 1.0, material3))
+    Scene(img, spheres, nothing, spp)
+end
+
+make_camera(;aspect_ratio=3/2) = Camera(;
+        lookfrom = Vect(13,  2,  3.0),
+        lookat   = Vect(0,   0,  0.0),
+        vup      = Vect(0,   1,  0.0),
+        vfov     = 20,
+        aspect_ratio = aspect_ratio,
+        aperture = 0.1,
+        focus_dist = 10.0,
+    )
+
 function main(;
                 verbose = true,
-                image_height = 400,
-                aspect_ratio = 16/9,
+                image_height = 1200,
+                aspect_ratio = 3/2,
                 spp::Int = 5,
                 depth::Int = 5,
              )
-    image_width = floor(Int, image_height * aspect_ratio)
-    img = zeros(RGB{Float64}, image_height, image_width)
+    scene = make_scene(image_height=image_height, aspect_ratio=aspect_ratio, spp=spp)
 
-    material_groud = Material(albedo=RGB(0.8, 0.8, 0.0), type=LAMBERTIAN)
-    material_center = Material(albedo=RGB(0.1, 0.2, 0.5), type=LAMBERTIAN)
-    material_left = Material(ir=1.5, type=DIELECTRIC)
-    material_right = Material(albedo=RGB(0.8, 0.6, 0.2), fuzz=1.0, type=METAL)
-
-    spheres = (
-        Sphere(Vect( 0.0, -100.5, -1.0), 100.0,   material_groud),
-        Sphere(Vect( 0.0,    0.0, -1.0),   0.5,   material_center),
-        Sphere(Vect(-1.0,    0.0, -1.0),   0.5,   material_left),
-        Sphere(Vect(-1.0,    0.0, -1.0), -0.45,   material_left),
-        Sphere(Vect( 1.0,    0.0, -1.0),   0.5,   material_right),
-    )
-    camera = Camera(;
-        lookfrom = Vect( 3,  3.0,  2),
-        lookat   = Vect( 0,  0.0, -1),
-        vup      = Vect( 0,    1,  0.0),
-        vfov     = 20,
-        aspect_ratio = aspect_ratio,
-        aperture = 2.0,
-    )
-    scene = Scene(img, spheres, nothing, spp)
+    camera = make_camera(aspect_ratio=aspect_ratio)
 
     raytrace!(scene, camera, depth; verbose=verbose)
     save(File(format"PNG", "ao.png"), scene.img)
