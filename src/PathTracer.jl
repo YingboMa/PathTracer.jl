@@ -55,14 +55,53 @@ struct Ray{V}
 end
 @muladd extrapolate(ray::Ray, t) = ray.org + t * ray.dir
 
+struct Intersection{T,P,N,M}
+    t::T
+    p::P
+    n::N
+    front::Bool
+    material::M
+end
+@inline function set_face_normal(insec::Intersection, r::Ray, outward_norm::Vect)
+    @set! insec.front = front = r.dir'outward_norm < 0
+    @set! insec.n = front ? outward_norm : -outward_norm
+    return insec
+end
+
 ###
 ### Material
 ###
-struct Material{C,E}
-    color::C
-    emission::E
-    type::Int
+abstract type AbstractMaterial
 end
+@enum MaterialType begin
+    LAMBERTIAN
+    METAL
+    DIELECTRIC
+end
+Base.@kwdef struct Material{C,E,F,I} <: AbstractMaterial
+    albedo::C = nothing
+    emission::E = nothing
+    fuzz::F = nothing
+    ir::I = nothing
+    type::MaterialType = LAMBERTIAN
+end
+function scatter(insec::Intersection, ray::Ray)
+    @unpack dir = ray
+    @unpack n, p, material = insec
+    if material.type === LAMBERTIAN
+        scatter_dir = n + random_unit_vector()
+        scattered = Ray(p, scatter_dir)
+        attenutation = material.albedo
+        return true, scattered, attenutation
+    elseif material.type === METAL
+        reflect_dir = reflect(dir, n)
+        reflected = Ray(p, reflect_dir)
+        attenutation = material.albedo
+        return reflect_dir'n > 0, reflected, attenutation
+    end
+end
+
+reflect(v::Vect, n::Vect) = v - (2*(v'n))*n # assume normalized
 
 ###
 ### Shapes
@@ -74,7 +113,6 @@ struct Sphere{V,T,M} <: AbstractShapes
     radius::T
     material::M
 end
-Sphere(c, r) = Sphere(c, r, nothing)
 @muladd function Base.intersect(sphere::Sphere, ray::Ray)
     T = eltype(ray.dir)
     rs = ray.org - sphere.center
@@ -98,7 +136,6 @@ struct Plane{V,M} <: AbstractShapes
     material::M
     Plane(p::V, n::V, material::M) where {V,M} = new{V,M}(p, normalize(n), material)
 end
-Plane(p, n) = Plane(p, n, nothing)
 
 @muladd function Base.intersect(plane::Plane, ray::Ray)
     T = eltype(ray.dir)
@@ -173,19 +210,6 @@ end
 ###
 ### Scene
 ###
-struct Intersection{T,P,N,O}
-    t::T
-    p::P
-    n::N
-    front::Bool
-    obj::O
-end
-@inline function set_face_normal(insec::Intersection, r::Ray, outward_norm::Vect)
-    @set! insec.front = front = r.dir'outward_norm < 0
-    @set! insec.n = front ? outward_norm : -outward_norm
-    return insec
-end
-
 struct Scene{I,S,P}
     img::I
     spheres::S
@@ -194,7 +218,8 @@ struct Scene{I,S,P}
 end
 
 function Base.intersect(scene::Scene, ray::Ray)
-    insec = Intersection(Inf, zero(ray.org), zero(ray.dir), false, first(scene.spheres))
+    insec = Intersection(Inf, zero(ray.org), zero(ray.dir), false, first(scene.spheres).material)
+    hit = false
     for o in scene.spheres
         t = intersect(o, ray)
         if 1.0e-6 < t < insec.t
@@ -202,24 +227,28 @@ function Base.intersect(scene::Scene, ray::Ray)
             @set! insec.p = p = extrapolate(ray, t)
             @set! insec.n = n = normal(o, p)
             insec = set_face_normal(insec, ray, n)
-            #@set! insec.obj = o
-            return true, insec
+            @set! insec.material = o.material
+            hit = true
         end
     end
-    return false, insec
+    return hit, insec
 end
 
 ###
 ### Ray tracing
 ###
 function ray_color(scene::Scene, r::Ray, depth::Int)
-    depth <= 0 && return RGB(0.0, 0.0, 0.0)
+    black = RGB(0.0, 0.0, 0.0)
+    depth <= 0 && return black
     hit, insec = intersect(scene, r)
     if hit
-        #target = insec.p + insec.n + random_in_unit_sphere()
-        #target = insec.p + insec.n + random_unit_vector()
-        target = insec.p + insec.n + random_in_hemisphere(insec.n)
-        return 0.5 * ray_color(scene, Ray(insec.p, target - insec.p), depth-1)
+        visable, scattered, attenutation = scatter(insec, r)
+        if visable
+            color = ray_color(scene, scattered, depth-1)
+            return RGB((@ntuple 3 i->getfield(attenutation, i) * getfield(color, i))...)
+        else
+            return black
+        end
     end
     t = 0.5 * (r.dir.y + 1)
     (1.0-t)*RGB(1.0, 1.0, 1.0) + t*RGB(0.5, 0.7, 1.0)
@@ -261,9 +290,17 @@ function main(;
     image_height = 400
     image_width = floor(Int, image_height * aspect_ratio)
     img = zeros(RGB{Float64}, image_height, image_width)
+
+    material_groud = Material(albedo=RGB(0.8, 0.8, 0.0), type=LAMBERTIAN)
+    material_center = Material(albedo=RGB(0.7, 0.3, 0.3), type=LAMBERTIAN)
+    material_left = Material(albedo=RGB(0.8, 0.8, 0.8), type=METAL)
+    material_right = Material(albedo=RGB(0.8, 0.6, 0.2), type=METAL)
+
     spheres = (
-        Sphere(Vect(0.0, 0, -1), 0.5),
-        Sphere(Vect(0.0, -100.5, -1), 100.0),
+        Sphere(Vect(0.0, -100.5, -1), 100.0, material_groud),
+        Sphere(Vect(0.0, 0.0, -1.0),    0.5,   material_center),
+        Sphere(Vect(-1.0, 0.0, -1.0),   0.5,   material_left),
+        Sphere(Vect(1.0, 0.0, -1.0),    0.5,   material_right),
     )
     camera = Camera(;
         aspect_ratio = aspect_ratio,
