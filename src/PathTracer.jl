@@ -24,7 +24,7 @@ Base.size(::Vect) = (3,)
 Base.Tuple(v::Vect) = v.x, v.y, v.z
 Vect(xx::Tuple) = Vect(xx...,)
 Vect(x::Number) = Vect(@ntuple 3 i->x)
-randvect(d::Distribution) = Vect(@ntuple 3 i->rand(d))
+@inline randvect(d::Distribution) = Vect(@ntuple 3 i->rand(d))
 Base.promote_rule(::Type{Vect{T}}, ::Type{Vect{S}}) where {T,S} = Vect{promote_type(T, S)}
 Base.convert(::Type{Vect{T}}, v::Vect{S}) where {T,S} = Vect(@ntuple 3 i->convert(T, v[i]))
 Images.RGB(v::Vect) = RGB((@ntuple 3 i->v[i])...)
@@ -58,7 +58,7 @@ struct Ray{V}
     dir::V
     Ray(org::V, dir::V) where V = new{V}(org, normalize(dir))
 end
-@muladd extrapolate(ray::Ray, t) = ray.org + t * ray.dir
+@inline @muladd extrapolate(ray::Ray, t) = ray.org + t * ray.dir
 
 struct Intersection{T,P,N,M}
     t::T
@@ -90,7 +90,7 @@ Base.@kwdef struct Material{C,E,F,I} <: AbstractMaterial
     ir::I = 1.0
     type::MaterialType = LAMBERTIAN
 end
-@muladd function scatter(insec::Intersection, ray::Ray)
+@inline @muladd function scatter(insec::Intersection, ray::Ray)
     @unpack dir = ray
     @unpack n, p, material, front = insec
     if material.type === LAMBERTIAN
@@ -113,7 +113,7 @@ end
 end
 
 @muladd reflect(v::Vect, n::Vect) = v - (2*(v'n))*n # assume normalized
-@fastmath @muladd function refract(uv::Vect, n::Vect, ir)
+@inline @fastmath @muladd function refract(uv::Vect, n::Vect, ir)
     cosθ = min(-(uv'n), 1)
     sinθ = sqrt(1 - cosθ^2)
     cannot_refract = ir * sinθ > 1
@@ -123,7 +123,7 @@ end
     return r_perp + r_para
 end
 
-function reflectance(cosθ, ir)
+@inline function reflectance(cosθ, ir)
     r₀ = (1 - ir) / (1 + ir)
     r₀ = r₀^2
     return r₀ + (1 - r₀)*(1 - cosθ)^5
@@ -139,7 +139,7 @@ struct Sphere{V,T,M} <: AbstractShapes
     radius::T
     material::M
 end
-@noinline @muladd function Base.intersect(sphere::Sphere, ray::Ray)
+@inline @muladd function Base.intersect(sphere::Sphere, ray::Ray)
     T = eltype(ray.dir)
     rs = ray.org - sphere.center
     B = (2 * rs)'ray.dir
@@ -154,7 +154,7 @@ end
     end
     return zero(T)
 end
-normal(sphere::Sphere, p0) = normalize(p0 - sphere.center)
+@inline normal(sphere::Sphere, p0) = normalize(p0 - sphere.center)
 
 struct Plane{V,M} <: AbstractShapes
     p::V
@@ -163,7 +163,7 @@ struct Plane{V,M} <: AbstractShapes
     Plane(p::V, n::V, material::M) where {V,M} = new{V,M}(p, normalize(n), material)
 end
 
-@muladd function Base.intersect(plane::Plane, ray::Ray)
+@inline @muladd function Base.intersect(plane::Plane, ray::Ray)
     T = eltype(ray.dir)
     v = ray.dir'plane.n
 
@@ -241,23 +241,23 @@ end
 ###
 ### Sampling
 ###
-function random_in_unit_sphere()
+@inline function random_in_unit_sphere()
     while true
         p = randvect(Uniform(-1.0, 1.0))
         p'p < 1 && return p
     end
 end
 
-random_in_hemisphere(n) = (v = random_in_unit_sphere(); dot(n, v) > 0 ? v : -v)
+@inline random_in_hemisphere(n) = (v = random_in_unit_sphere(); dot(n, v) > 0 ? v : -v)
 
-function random_unit_vector()
+@inline function random_unit_vector()
     φ = rand(Uniform(0, 2pi))
     z = rand(Uniform(-1, 1.0))
     r = sqrt(1.0 - z^2)
     return Vect(cos(φ)*r, sin(φ)*r, z)
 end
 
-function random_in_unit_disk()
+@inline function random_in_unit_disk()
     while true
         p = Vect(rand(Uniform(-1, 1.0)), rand(Uniform(-1, 1.0)), 0.0)
         p'p < 1 && return p
@@ -274,7 +274,7 @@ struct Scene{I,S,P}
     spp::Int # smaples per pixel
 end
 
-function Base.intersect(scene::Scene, ray::Ray)
+@inline function Base.intersect(scene::Scene, ray::Ray)
     insec = Intersection(Inf, zero(ray.org), zero(ray.dir), false, first(scene.spheres).material)
     hit = false
     for o in scene.spheres
