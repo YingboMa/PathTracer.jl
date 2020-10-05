@@ -9,6 +9,7 @@ using Printf
 using Distributions
 using Base.Cartesian
 using ProgressMeter
+using KernelAbstractions
 
 ###
 ### Math
@@ -311,15 +312,12 @@ end
     (1.0-t)*Vect(1.0, 1.0, 1.0) + t*Vect(0.5, 0.7, 1.0)
 end
 
+#=
 @muladd function raytrace!(scene::Scene, camera::Camera, depth::Int; verbose=true)
     @unpack img, spp = scene
     @unpack origin, lower_left_corner, horizontal, vertical = camera
     he, wi = size(img)
-    scale = inv(spp)
-    progress = Progress(wi, dt=0.5,
-                        barglyphs=BarGlyphs('|','█', ['▁' ,'▂' ,'▃' ,'▄' ,'▅' ,'▆', '▇'],' ','|',))
     Threads.@threads for w in 0:wi-1
-        verbose && next!(progress)
         for h in 0:he-1
             vcolor = Vect(0.0, 0.0, 0.0)
             for _ in 1:spp
@@ -330,11 +328,32 @@ end
                 vcolor += ray_color(scene, ray, depth)
             end
             # gamma correction
+            scale = inv(spp)
             color = RGB((@ntuple 3 i->sqrt(scale * vcolor[i]))...)
             img[he-h, w+1] = color
         end
     end
     return scene
+end
+=#
+
+@kernel function raytrace_kernel!(scene::Scene, camera::Camera, depth::Int; verbose=true)
+    w, h = @index(Global, NTuple)
+    @unpack img, spp = scene
+    @unpack origin, lower_left_corner, horizontal, vertical = camera
+    he, wi = size(img)
+    vcolor = Vect(0.0, 0.0, 0.0)
+    for _ in 1:spp
+        # anti-aliasing
+        u = (w + rand()) / (wi - 1)
+        v = (h + rand()) / (he - 1)
+        ray = Ray(camera, u, v)
+        vcolor += ray_color(scene, ray, depth)
+    end
+    # gamma correction
+    scale = inv(spp)
+    color = RGB((@ntuple 3 i->sqrt(scale * vcolor[i]))...)
+    img[he-h, w+1] = color
 end
 
 function make_scene(;image_height = 1200, aspect_ratio = 3/2, spp=5)
@@ -393,7 +412,9 @@ function main(;
 
     camera = make_camera(aspect_ratio=aspect_ratio)
 
-    raytrace!(scene, camera, depth; verbose=verbose)
+    raytrace! = raytrace_kernel!(CPU(), 8)
+    event = raytrace!(scene, camera, depth; ndrange=size(scene.img).-1)
+    wait(event)
     save(File(format"PNG", "ray.png"), scene.img)
 end
 
