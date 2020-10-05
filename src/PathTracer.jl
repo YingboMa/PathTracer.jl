@@ -338,7 +338,9 @@ end
 =#
 
 @kernel function raytrace_kernel!(scene::Scene, camera::Camera, depth::Int; verbose=true)
-    w, h = @index(Global, NTuple)
+    h, w = @index(Global, NTuple)
+    w -= 1
+    h -= 1
     @unpack img, spp = scene
     @unpack origin, lower_left_corner, horizontal, vertical = camera
     he, wi = size(img)
@@ -413,7 +415,7 @@ function main(;
     camera = make_camera(aspect_ratio=aspect_ratio)
 
     raytrace! = raytrace_kernel!(CPU(), 8)
-    event = raytrace!(scene, camera, depth; ndrange=size(scene.img).-1)
+    event = raytrace!(scene, camera, depth; ndrange=size(scene.img))
     wait(event)
     save(File(format"PNG", "ray.png"), scene.img)
 end
